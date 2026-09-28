@@ -1,0 +1,31 @@
+plugins {
+    id 'java-library'
+}
+
+group = 'org.tielang'
+version = '0.1.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+jar {
+    manifest {
+        attributes('Implementation-Title': 'zd-java',
+                   'Implementation-Version': project.version)
+    }
+}
+
+// 确定性探针（纯 JVM，同输入同结果） / The deterministic probe (pure JVM).
+tasks.register('probe', JavaExec) {
+    group = 'verification'
+    description = 'Run the zd-java deterministic probe (103 checks, pure JVM)'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'org.tielang.zd.ZdProbe'
+}

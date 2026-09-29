@@ -2,6 +2,57 @@
 
 Reverse chronological. / 倒序排列。
 
+## [0.2.0] Graph columnar carriage + nullable node payloads + repo scaffolding / 图容器列式承载 + 节点载荷可空 + 仓内脚手架 (2026-09-29)
+
+* `ZdGraph` 图容器新增**列式承载**（设计案 §6「大图的节点表与边表应当用列式容器 + 编码族承载
+  —— id 列用 delta、标签列用字典」）：声明字节 bit2 标记形态，`encodeColumnar` 产出
+  `[声明][varint 列式容器长度][列式容器 7 列][varint 载荷区长度][载荷区]`；`decode` 按声明位 2
+  **自动分派**两形态，语义等价。`encodeColumnarExt` 提供 ext 子类型（0x47）形态 /
+  `ZdGraph` gains the **columnar carriage** (design §6): declaration bit 2 marks the form;
+  `encodeColumnar` emits `[decl][varint columnar length][7-column container][varint payload
+  length][payload area]`; `decode` auto-dispatches on bit 2 and the two forms are
+  semantically equivalent. `encodeColumnarExt` is the ext-subtype (0x47) form
+* 列式 7 列（固定序）：`node_id` / `edge_from` / `edge_to` / `edge_label` / `edge_weight` /
+  `edge_dir_ovr` / `edge_head`。**列自动择优**（纯表示层）——全同值列 → RLE、非降序整型列 →
+  delta、标签列 → 字典；纯结构图的权重（全 0.0）/ 覆盖（全 -1）/ 头列因此从 8 或 1 字节/边
+  降到单游程 /
+  Seven columns (fixed order): `node_id` / `edge_from` / `edge_to` / `edge_label` /
+  `edge_weight` / `edge_dir_ovr` / `edge_head`, with **per-column auto-pick** (a pure
+  representation layer) — all-equal → RLE, non-descending integer → delta, label →
+  dictionary. This shrinks the weight (all 0.0) / override (all -1) / head columns of a
+  pure-structure graph from 8 or 1 byte per edge to a single run
+* 实测收益（2000 节点 / 4000 边，列式 ÷ 紧凑）：纯结构 **2.8×**、变权重 **1.7×**、含载荷属性
+  **1.3×**；载荷区（任意 zd 值）仍走自定界 wire2 子树，是含载荷图的体积大头 /
+  Measured gain (2000 nodes / 4000 edges, columnar vs compact): pure structure **2.8×**,
+  varying weights **1.7×**, with payloads + attributes **1.3×**. The payload area (any zd
+  value) still rides self-delimiting wire2 subtrees — the bulk of payload-heavy graphs
+* **破坏性**：紧凑形态的节点载荷改为**可空**——`节点 = [id][载荷标志 1B][载荷?][属性标志 1B]
+  [属性?]`（原布局无条件写载荷，无法表达「无载荷节点」，与列式形态的稀疏载荷区不等价）。
+  0.1.0 无外部消费者，此番为规范澄清；两形态从此语义完全对齐 /
+  **Breaking**: the compact form's node payload became **nullable** —
+  `node = [id][payload flag][payload?][attr flag][attrs?]` (the old layout always wrote a
+  payload, unable to express a payload-less node, and thus diverged from the columnar
+  form's sparse payload area). 0.1.0 has no external consumers; this is a spec
+  clarification, and the two forms now align exactly
+* 修复两处缺陷（均由探针抓出）：① 空列的 delta 编码/解码越界（空图的 `node_id` 列）；② 列式
+  形态分派分支缺尾部字节校验（多段文档里段尾多余字节会被静默忽略）/
+  Two defects fixed (both caught by the probe): (1) delta encode/decode on an empty
+  column (the `node_id` column of an empty graph); (2) the columnar dispatch branch
+  lacked the trailing-bytes check (excess bytes after a segment payload were silently
+  ignored)
+* 仓内脚手架：Gradle wrapper（`./gradlew probe`，免全局 Gradle）；发布配置（pom `release`
+  profile：source/javadoc jar + GPG 签名 + Sonatype Central Portal 上传，
+  `autoPublish=false` 留人工闸）+ [docs/publishing.md](docs/publishing.md) 发布指南 /
+  Repo scaffolding: a Gradle wrapper (`./gradlew probe`, no global Gradle needed) and the
+  publishing setup (the pom `release` profile: source/javadoc jars + GPG signing +
+  Central Portal upload with `autoPublish=false` as a manual gate) plus
+  [docs/publishing.md](docs/publishing.md)
+* `ZdProbe` 121 checks 全绿（新增 18 条图容器列式检查：两形态往返与语义等价、稀疏载荷/属性、
+  自动择优、id 非升序回退、string id 拒绝、空图、尾部字节拒绝、体积收益） /
+  `ZdProbe` 121 checks green (18 new graph-columnar checks: round-trips and semantic
+  equivalence of both forms, sparse payloads/attrs, auto-picking, non-ascending id
+  fallback, string-id rejection, the empty graph, trailing-byte rejection, size gain)
+
 ## [0.1.0] zd v3 full support — initial release / zd v3 完整支持——首发 (2026-09-28)
 
 * zd v3 载体全量：10 字节头（写方缺省 v3 `"03"`、v2 兼容路径、写侧禁写 v1；v3 flags

@@ -16,6 +16,9 @@ release (stabilization only).
 | p.1.3 | schema 演进（三态 + 字段号不复用 + schema_id）+ tsha1f Java 移植（KAT 对齐 gen_tsha1_core.py）/ Schema evolution + the tsha1f Java port (KAT-aligned) | landed / 已落地 |
 | p.1.4 | 标准类型三件（timestamp/decimal/uuid）+ 图容器（段 + ext）+ 压缩载荷段 / The three standard types + the graph container + compressed segments | landed / 已落地 |
 | p.1.5 | 生态对齐：KAT 向量集发 tie-spec 仓 + 跨语言一致性复核 / Ecosystem alignment: the KAT vector set to the tie-spec repo + cross-language consistency review | planned / 计划 |
+| p.1.6 | 图容器列式承载（设计案 §6 的「应当」项）+ 列级编码自动择优 / Graph columnar carriage + automatic per-column encoding picking | landed / 已落地 |
+| p.1.7 | 仓内脚手架：Gradle wrapper + Maven Central 发布通道（release profile + 指南）/ Repo scaffolding: the Gradle wrapper + the Maven Central publishing channel | landed / 已落地 |
+| p.1.8 | 发布：申请 `org.tielang` 命名空间并首发 Maven Central / Publish: claim the `org.tielang` namespace and ship to Maven Central | planned / 计划 |
 
 ## 设计纪律 / Design Discipline
 

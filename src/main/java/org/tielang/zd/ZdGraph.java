@@ -9,9 +9,11 @@ import java.util.Set;
  * zd v3 图容器（语言无关的图序列化，{@code 2026-09-28-zd-v3-design.md} §6）：新段类型
  * （段类型 4），同时可作为 ext 子类型（类型标记 {@code 0x47 'G'}）嵌入任意 zd 值位置。
  * <pre>
- * 图容器 = [声明 1B][节点数 varint][节点表][边数 varint][边表]
- * 声明字节：bit0 有向（0 无向 / 1 有向）；bit1 节点 id 形态（0 varint 索引 / 1 string 显式 id）
- * 节点 = [id][载荷：任意 zd 值][属性：map（可空）]
+ * 紧凑形态 = [声明 1B][节点数 varint][节点表][边数 varint][边表]
+ * 列式形态 = [声明 1B, bit2 置位][varint 列式容器长度][列式容器][varint 载荷区长度][载荷区]
+ * 声明字节：bit0 有向（0 无向 / 1 有向）；bit1 节点 id 形态（0 varint 索引 / 1 string 显式 id）；
+ *          bit2 列式承载（zd-java 钉定，见 {@link #encodeColumnar}）
+ * 节点 = [id][载荷标志 1B：0 无 / 1 有][载荷（有则：任意 zd 值）][属性标志 1B：0 无 / 1 有][属性（有则：map）]
  * 边   = [from: 节点引用 varint][to: 节点引用 varint][边头 1B][标签 string（可选）]
  *        [权重 f64 BE（可选）][属性 map（可选）]
  * 边头字节：bit0 有向覆盖（与容器声明异或生效）；bit1 带标签；bit2 带权重；bit3 带属性
@@ -20,8 +22,8 @@ import java.util.Set;
  * 合法；空图（0 节点 0 边）合法。<b>zd 值嵌入形态（zd-java 钉定）</b>：任意 zd 值 /
  * 属性 map 在值位置嵌入为 {@code varint 行数 + 行数 × 六字段 wire2 记录}（自定界子树，
  * 见 {@link ZdTrees}）。tie 侧图的边与节点操作产生/消费此容器；节点载荷可携带 code 等
- * ext 载荷；大图的节点表与边表应当用列式容器 + 编码族承载（本类提供整图容器，列式承载
- * 由调用方组合 {@link ZdColumnar}）。
+ * ext 载荷；大图的节点表与边表按设计案 §6 用<b>列式承载</b>——{@link #encodeColumnar}
+ * 以 id 列 delta + 标签列字典承载，{@link #decode} 按声明位 2 自动分派两种形态。
  * <p>
  * The zd v3 graph container (language-agnostic graph serialisation, §6 of the v3
  * design): a new segment type (type 4) that can also ride as an ext subtype (marker
@@ -42,6 +44,21 @@ public final class ZdGraph {
     public static final int DECL_DIRECTED = 1;
     /** 声明位 1：节点 id 用 string 显式 id。 / Declaration bit 1: node ids are explicit strings. */
     public static final int DECL_STRING_IDS = 2;
+    /**
+     * 声明位 2：<b>列式承载</b>（zd-java 钉定，随 KAT 向量集同步 tie-spec 仓）。置位时节点表与
+     * 边表按设计案 §6 用列式容器 + 编码族承载（id 列 delta / 标签列字典），形态为
+     * {@code [声明 1B][varint 列式容器长度][列式容器][varint 载荷区长度][载荷区]}；清零时
+     * 沿用紧凑逐条形态 {@code [声明][节点数][节点表][边数][边表]}。两种形态语义等价，
+     * {@link #decode} 按本位自动分派。
+     * <p>
+     * Declaration bit 2: <b>columnar carriage</b> (pinned by zd-java, to be synced to the
+     * tie-spec KAT set). When set, the node and edge tables ride on the columnar container
+     * + encoding family per design §6 (delta for the id column, dictionary for the label
+     * column): {@code [decl 1B][varint columnar length][columnar container][varint payload
+     * length][payload area]}; when clear, the compact per-record form is used. The two
+     * forms are semantically equivalent and {@link #decode} dispatches on this bit.
+     */
+    public static final int DECL_COLUMNAR = 4;
 
     /** 边头位 0：有向覆盖（与容器声明异或生效）。 / Edge-head bit 0: directed override (XOR with the container declaration). */
     public static final int EDGE_DIRECTED_OVERRIDE = 1;
@@ -92,7 +109,12 @@ public final class ZdGraph {
             } else {
                 ZdPrimitives.writeVarint(out, (Long) n.id());
             }
-            writeValue(out, n.payload());
+            if (n.payload() == null) {
+                out.write(0x00);
+            } else {
+                out.write(0x01);
+                writeValue(out, n.payload());
+            }
             if (n.attrs() == null) {
                 out.write(0x00);
             } else {
@@ -104,19 +126,7 @@ public final class ZdGraph {
         for (GEdge e : g.edges()) {
             ZdPrimitives.writeVarint(out, e.from());
             ZdPrimitives.writeVarint(out, e.to());
-            int head = 0;
-            if (e.directedOverride() != null) {
-                head |= EDGE_DIRECTED_OVERRIDE;
-            }
-            if (e.label() != null) {
-                head |= EDGE_HAS_LABEL;
-            }
-            if (e.weight() != null) {
-                head |= EDGE_HAS_WEIGHT;
-            }
-            if (e.attrs() != null) {
-                head |= EDGE_HAS_ATTRS;
-            }
+            int head = headByte(e);
             out.write(head);
             if (e.directedOverride() != null) {
                 out.write(e.directedOverride() ? 1 : 0);
@@ -143,6 +153,328 @@ public final class ZdGraph {
         return ZdExt.encode(ZdExt.TAG_GRAPH, encode(g));
     }
 
+    /**
+     * 列式承载编码（声明位 2 置位）：节点表与边表按设计案 §6 走列式容器 + 编码族——id 列
+     * 升序时自动用 delta（否则回退 plain）、标签列用字典；节点载荷与边属性以稀疏载荷区承载
+     * （仅列有值的下标，升序确定性）。
+     * <pre>
+     * [声明 1B, bit2 置位] [varint 列式容器长度] [列式容器] [varint 载荷区长度] [载荷区]
+     * 列式容器 7 列（固定序）：
+     *   0 node_id       i64     delta | plain（id 严格升序 → delta，否则 plain）
+     *   1 edge_from     i64     plain
+     *   2 edge_to       i64     plain
+     *   3 edge_label    string  dict（空串 = 无标签）
+     *   4 edge_weight   f64     plain（头位无权重时写 0.0，读侧按头位还原 null）
+     *   5 edge_dir_ovr  i64     plain（-1 无覆盖 / 0 false / 1 true）
+     *   6 edge_head     i64     plain（与紧凑形态同定义）
+     * 载荷区 = varint 节点载荷数 + 各 [varint 节点下标(升序) + 值]
+     *        + varint 节点属性数 + 各 [varint 节点下标(升序) + 值]
+     *        + varint 边属性数   + 各 [varint 边下标(升序) + 值]
+     * </pre>
+     * 仅支持 varint 索引 id（delta 列只对整型有效——string 显式 id 的图请用紧凑形态，本方法
+     * 确定性 IAE）。
+     * <p>
+     * Columnar carriage (declaration bit 2 set): the node and edge tables ride on the
+     * columnar container + encoding family per design §6 — the id column uses delta when
+     * the ids ascend (plain otherwise), the label column uses the dictionary; node
+     * payloads and edge attributes ride a sparse payload area (only indices that carry a
+     * value, ascending, deterministic). See the layout above. Only varint-index ids are
+     * supported (the delta column is integer-only — graphs with explicit string ids must
+     * use the compact form; this method rejects them deterministically).
+     */
+    public static byte[] encodeColumnar(GraphData g) {
+        validate(g);
+        if (g.stringIds()) {
+            throw new IllegalArgumentException("zd columnar graph form supports varint-index ids only (string-id graphs use the compact form)");
+        }
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.write((g.directed() ? DECL_DIRECTED : 0) | DECL_COLUMNAR);
+
+        int n = g.nodes().size();
+        long[] ids = new long[n];
+        for (int i = 0; i < n; i++) {
+            ids[i] = (Long) g.nodes().get(i).id();
+        }
+        int m = g.edges().size();
+        long[] froms = new long[m];
+        long[] tos = new long[m];
+        String[] labels = new String[m];
+        double[] weights = new double[m];
+        long[] ovr = new long[m];
+        long[] heads = new long[m];
+        for (int i = 0; i < m; i++) {
+            GEdge e = g.edges().get(i);
+            froms[i] = e.from();
+            tos[i] = e.to();
+            labels[i] = e.label() == null ? "" : e.label();
+            weights[i] = e.weight() == null ? 0.0 : e.weight();
+            ovr[i] = e.directedOverride() == null ? -1L : (e.directedOverride() ? 1L : 0L);
+            heads[i] = headByte(e);
+        }
+        // 列自动择优：全同值 → RLE；非降序 → delta；否则 plain / auto-pick per column
+        List<ZdColumnar.Column> cols = List.of(
+                ZdColumnar.Column.ofInts(ids).encoding(pickIntEncoding(ids)),
+                ZdColumnar.Column.ofInts(froms).encoding(pickIntEncoding(froms)),
+                ZdColumnar.Column.ofInts(tos).encoding(pickIntEncoding(tos)),
+                ZdColumnar.Column.ofStrings(labels).encoding(ZdColumnar.ENC_DICT),
+                ZdColumnar.Column.ofDoubles(weights).encoding(pickDoubleEncoding(weights)),
+                ZdColumnar.Column.ofInts(ovr).encoding(pickIntEncoding(ovr)),
+                ZdColumnar.Column.ofInts(heads).encoding(pickIntEncoding(heads)));
+        byte[] columnar = ZdColumnar.encode(cols);
+        ZdPrimitives.writeVarint(out, columnar.length);
+        out.write(columnar, 0, columnar.length);
+
+        // 载荷区（稀疏，下标升序） / payload area (sparse, ascending indices)
+        ByteArrayOutputStream payload = new ByteArrayOutputStream();
+        int pc = 0;
+        for (GNode node : g.nodes()) {
+            if (node.payload() != null) {
+                pc++;
+            }
+        }
+        ZdPrimitives.writeVarint(payload, pc);
+        for (int i = 0; i < n; i++) {
+            GNode node = g.nodes().get(i);
+            if (node.payload() != null) {
+                ZdPrimitives.writeVarint(payload, i);
+                writeValue(payload, node.payload());
+            }
+        }
+        int ac = 0;
+        for (GNode node : g.nodes()) {
+            if (node.attrs() != null) {
+                ac++;
+            }
+        }
+        ZdPrimitives.writeVarint(payload, ac);
+        for (int i = 0; i < n; i++) {
+            GNode node = g.nodes().get(i);
+            if (node.attrs() != null) {
+                ZdPrimitives.writeVarint(payload, i);
+                writeValue(payload, node.attrs());
+            }
+        }
+        int ec = 0;
+        for (GEdge e : g.edges()) {
+            if (e.attrs() != null) {
+                ec++;
+            }
+        }
+        ZdPrimitives.writeVarint(payload, ec);
+        for (int i = 0; i < m; i++) {
+            GEdge e = g.edges().get(i);
+            if (e.attrs() != null) {
+                ZdPrimitives.writeVarint(payload, i);
+                writeValue(payload, e.attrs());
+            }
+        }
+        byte[] pb = payload.toByteArray();
+        ZdPrimitives.writeVarint(out, pb.length);
+        out.write(pb, 0, pb.length);
+        return out.toByteArray();
+    }
+
+    /** 列式形态的 ext 编码（标记 0x47）。 / The ext encoding of the columnar form (marker 0x47). */
+    public static byte[] encodeColumnarExt(GraphData g) {
+        return ZdExt.encode(ZdExt.TAG_GRAPH, encodeColumnar(g));
+    }
+
+    /**
+     * 整型列自动择优：全同值 → RLE（纯结构图的覆盖列 / 头列极省）、非降序（差分非负）→
+     * delta（id 列）、否则 plain。<b>纯表示层</b>——三种编码解码后值域完全一致。
+     * Auto-picks the encoding for an integer column: all-equal → RLE (the override / head
+     * columns of a pure-structure graph shrink hugely), non-descending (non-negative
+     * diffs) → delta (id columns), otherwise plain. <b>A pure representation layer</b> —
+     * all three decode to the identical values.
+     */
+    private static int pickIntEncoding(long[] v) {
+        if (allSameInt(v)) {
+            return ZdColumnar.ENC_RLE;
+        }
+        for (int i = 1; i < v.length; i++) {
+            if (v[i] < v[i - 1]) {
+                return ZdColumnar.ENC_PLAIN;
+            }
+        }
+        return ZdColumnar.ENC_DELTA;
+    }
+
+    /** f64 列自动择优：全同位模式 → RLE，否则 plain。 /
+     *  Auto-picks for an f64 column: all-equal bit patterns → RLE, otherwise plain. */
+    private static int pickDoubleEncoding(double[] v) {
+        if (v.length > 1) {
+            boolean same = true;
+            long b0 = Double.doubleToLongBits(v[0]);
+            for (int i = 1; i < v.length; i++) {
+                if (Double.doubleToLongBits(v[i]) != b0) {
+                    same = false;
+                    break;
+                }
+            }
+            if (same) {
+                return ZdColumnar.ENC_RLE;
+            }
+        }
+        return ZdColumnar.ENC_PLAIN;
+    }
+
+    private static boolean allSameInt(long[] v) {
+        if (v.length <= 1) {
+            return false;
+        }
+        for (int i = 1; i < v.length; i++) {
+            if (v[i] != v[0]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** 图载荷是否为列式形态（声明位 2 置位）。 /
+     *  Whether the graph payload uses the columnar form (declaration bit 2 set). */
+    public static boolean isColumnarForm(byte[] b, int off, int len) {
+        if (off < 0 || len < 1 || off >= b.length) {
+            return false;
+        }
+        return (b[off] & DECL_COLUMNAR) != 0;
+    }
+
+    /** 列式形态解码（列式容器 + 稀疏载荷区）。 /
+     *  Decodes the columnar form (the columnar container + sparse payload area). */
+    private static GraphData decodeColumnar(byte[] b, int[] pos, int end,
+                                           boolean directed, boolean stringIds) {
+        if (stringIds) {
+            throw new IllegalArgumentException("zd columnar graph form supports varint-index ids only");
+        }
+        long colLen = ZdPrimitives.readVarint(b, pos);
+        if (colLen < 0 || colLen > end - pos[0]) {
+            throw new IllegalArgumentException("zd columnar graph container overruns the payload");
+        }
+        List<ZdColumnar.Column> cols = ZdColumnar.decodeV3(b, pos[0], (int) colLen);
+        pos[0] += (int) colLen;
+        if (cols.size() != 7) {
+            throw new IllegalArgumentException("zd columnar graph form expects 7 columns, got " + cols.size());
+        }
+        for (int i = 0; i < 7; i++) {
+            int want = switch (i) {
+                case 3 -> ZdColumnar.TY_STRING;
+                case 4 -> ZdColumnar.TY_F64;
+                default -> ZdColumnar.TY_I64;
+            };
+            if (cols.get(i).type() != want) {
+                throw new IllegalArgumentException("zd columnar graph column " + i + " has the wrong type " + cols.get(i).type());
+            }
+        }
+        long[] ids = cols.get(0).ints();
+        long[] froms = cols.get(1).ints();
+        long[] tos = cols.get(2).ints();
+        String[] labels = cols.get(3).strings();
+        double[] weights = cols.get(4).doubles();
+        long[] ovr = cols.get(5).ints();
+        long[] heads = cols.get(6).ints();
+        int n = ids.length;
+        int m = froms.length;
+        if (tos.length != m || labels.length != m || weights.length != m
+                || ovr.length != m || heads.length != m) {
+            throw new IllegalArgumentException("zd columnar graph edge columns have mismatched lengths");
+        }
+
+        long payLen = ZdPrimitives.readVarint(b, pos);
+        if (payLen < 0 || payLen > end - pos[0]) {
+            throw new IllegalArgumentException("zd columnar graph payload area overruns the payload");
+        }
+        int payEnd = pos[0] + (int) payLen;
+        ZdNode[] payloads = new ZdNode[n];
+        long pCount = ZdPrimitives.readVarint(b, pos);
+        if (pCount < 0 || pCount > n) {
+            throw new IllegalArgumentException("zd columnar graph node payload count out of range: " + pCount);
+        }
+        long prev = -1;
+        for (long i = 0; i < pCount; i++) {
+            long idx = ZdPrimitives.readVarint(b, pos);
+            if (idx <= prev || idx >= n) {
+                throw new IllegalArgumentException("zd columnar graph node payload index invalid: " + idx);
+            }
+            prev = idx;
+            payloads[(int) idx] = readValue(b, pos, payEnd);
+        }
+        ZdNode[] nodeAttrs = new ZdNode[n];
+        long nAc = ZdPrimitives.readVarint(b, pos);
+        if (nAc < 0 || nAc > n) {
+            throw new IllegalArgumentException("zd columnar graph node attr count out of range: " + nAc);
+        }
+        prev = -1;
+        for (long i = 0; i < nAc; i++) {
+            long idx = ZdPrimitives.readVarint(b, pos);
+            if (idx <= prev || idx >= n) {
+                throw new IllegalArgumentException("zd columnar graph node attr index invalid: " + idx);
+            }
+            prev = idx;
+            nodeAttrs[(int) idx] = readValue(b, pos, payEnd);
+        }
+        ZdNode[] attrs = new ZdNode[m];
+        long aCount = ZdPrimitives.readVarint(b, pos);
+        if (aCount < 0 || aCount > m) {
+            throw new IllegalArgumentException("zd columnar graph edge attr count out of range: " + aCount);
+        }
+        prev = -1;
+        for (long i = 0; i < aCount; i++) {
+            long idx = ZdPrimitives.readVarint(b, pos);
+            if (idx <= prev || idx >= m) {
+                throw new IllegalArgumentException("zd columnar graph edge attr index invalid: " + idx);
+            }
+            prev = idx;
+            attrs[(int) idx] = readValue(b, pos, payEnd);
+        }
+        if (pos[0] != payEnd) {
+            throw new IllegalArgumentException("zd columnar graph payload area has trailing bytes");
+        }
+
+        List<GNode> nodes = new java.util.ArrayList<>(n);
+        Set<Object> seen = new HashSet<>();
+        for (int i = 0; i < n; i++) {
+            if (ids[i] < 0 || !seen.add(ids[i])) {
+                throw new IllegalArgumentException("zd columnar graph node id invalid or duplicated: " + ids[i]);
+            }
+            nodes.add(new GNode(ids[i], payloads[i], nodeAttrs[i]));
+        }
+        List<GEdge> edges = new java.util.ArrayList<>(m);
+        for (int i = 0; i < m; i++) {
+            long head = heads[i];
+            if (froms[i] < 0 || froms[i] >= n || tos[i] < 0 || tos[i] >= n) {
+                throw new IllegalArgumentException("zd columnar graph edge references a missing node (from "
+                        + froms[i] + ", to " + tos[i] + ", nodes " + n + ")");
+            }
+            Boolean override = (head & EDGE_DIRECTED_OVERRIDE) != 0
+                    ? (ovr[i] == 1L) : null;
+            if (override != null && ovr[i] != 0L && ovr[i] != 1L) {
+                throw new IllegalArgumentException("zd columnar graph directed override out of range: " + ovr[i]);
+            }
+            String label = (head & EDGE_HAS_LABEL) != 0 ? labels[i] : null;
+            Double weight = (head & EDGE_HAS_WEIGHT) != 0 ? weights[i] : null;
+            edges.add(new GEdge((int) froms[i], (int) tos[i], override, label, weight, attrs[i]));
+        }
+        return new GraphData(directed, false, nodes, edges);
+    }
+
+    /** 边头字节（两形态共用）。 / The edge-head byte (shared by both forms). */
+    private static int headByte(GEdge e) {
+        int head = 0;
+        if (e.directedOverride() != null) {
+            head |= EDGE_DIRECTED_OVERRIDE;
+        }
+        if (e.label() != null) {
+            head |= EDGE_HAS_LABEL;
+        }
+        if (e.weight() != null) {
+            head |= EDGE_HAS_WEIGHT;
+        }
+        if (e.attrs() != null) {
+            head |= EDGE_HAS_ATTRS;
+        }
+        return head;
+    }
+
     // ==================== 解码（读侧） / decoding (read side) ====================
 
     /**
@@ -159,6 +491,14 @@ public final class ZdGraph {
         int decl = b[pos[0]++] & 0xFF;
         boolean directed = (decl & DECL_DIRECTED) != 0;
         boolean stringIds = (decl & DECL_STRING_IDS) != 0;
+        if ((decl & DECL_COLUMNAR) != 0) {
+            GraphData g = decodeColumnar(b, pos, end, directed, stringIds);
+            if (pos[0] != end) {
+                throw new IllegalArgumentException("zd graph container has trailing bytes ("
+                        + (end - pos[0]) + " unparsed)");
+            }
+            return g;
+        }
         long nodeCount = ZdPrimitives.readVarint(b, pos);
         if (nodeCount < 0 || nodeCount > Integer.MAX_VALUE) {
             throw new IllegalArgumentException("zd graph node count out of range: " + nodeCount);
@@ -171,7 +511,13 @@ public final class ZdGraph {
             if (!ids.add(id)) {
                 throw new IllegalArgumentException("zd graph node id is not unique: " + id);
             }
-            ZdNode payload = readValue(b, pos, end);
+            ZdNode payload = null;
+            int pf = b[pos[0]++] & 0xFF;
+            if (pf == 0x01) {
+                payload = readValue(b, pos, end);
+            } else if (pf != 0x00) {
+                throw new IllegalArgumentException("zd graph node payload flag must be 0/1: " + pf);
+            }
             ZdNode attrs = null;
             int flag = b[pos[0]++] & 0xFF;
             if (flag == 0x01) {

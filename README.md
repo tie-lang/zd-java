@@ -28,8 +28,14 @@ type 4 + ext subtype 0x47).
   `tests/tsha_probe/gen_tsha1_core.py` 逐位一致，KAT 钉入 `ZdProbe`）
 * 标准类型（ext 固定标记）：timestamp = 1（8B 纪元秒 i64 BE + 4B 纳秒 u32 BE）、
   decimal = 2（符号 1B + 数字串 UTF-8 + 指数 i8）、uuid = 3（16B RFC 4122）
-* 图容器：`[声明 1B][节点数][节点表][边数][边表]`；边头 bit0 有向覆盖（与容器声明异或）、
-  bit1 标签、bit2 权重、bit3 属性；节点 id 唯一、边引用必须存在、自环/多重边/空图合法
+* 图容器：`[声明 1B][节点数][节点表][边数][边表]`，或**列式承载**（声明位 2）；声明字节
+  bit0 有向 / bit1 节点 id 形态（varint 索引 | string 显式 id）/ bit2 列式承载；节点 =
+  `[id][载荷标志][载荷?][属性标志][属性?]`；边头 bit0 有向覆盖（与容器声明异或）、bit1 标签、
+  bit2 权重、bit3 属性；节点 id 唯一、边引用必须存在、自环/多重边/空图合法
+* **列式承载**（大图，设计案 §6「id 列用 delta、标签列用字典」）：`encodeColumnar` 自动择优
+  —— 全同值列 → RLE、非降序整型列 → delta、标签列 → 字典；`decode` 按声明位 2 自动分派，
+  两形态语义等价。实测收益（2 千节点 / 4 千边）：纯结构 **2.8×**、含权重 **1.7×**、含载荷
+  属性 **1.3×**
 
 * Header (10 bytes): the `TIEDBZD` magic + two base-48 version digits (v2 = `00 02`,
   v3 = `00 03`) + flags; v3 flags use the low 7 bits (bit5 index footer, bit6 graph hint)
@@ -47,10 +53,19 @@ type 4 + ext subtype 0x47).
 * Standard types (fixed ext markers): timestamp = 1 (8B epoch-seconds i64 BE + 4B
   nanoseconds u32 BE), decimal = 2 (1B sign + digit string UTF-8 + i8 exponent),
   uuid = 3 (16B RFC 4122)
-* Graph container: `[decl 1B][node count][node table][edge count][edge table]`; the
-  edge-head bits are 0 directed-override (XOR with the container declaration), 1 label,
-  2 weight, 3 attributes; node ids unique, edge endpoints must exist, self-loops /
-  multi-edges / the empty graph legal
+* Graph container: the compact form `[decl 1B][node count][node table][edge count]
+  [edge table]` or the **columnar carriage** (declaration bit 2); declaration bits are
+  0 directed, 1 node-id form (varint index | explicit string), 2 columnar; a node =
+  `[id][payload flag][payload?][attr flag][attrs?]`; edge-head bits are 0
+  directed-override (XOR with the container declaration), 1 label, 2 weight,
+  3 attributes; node ids unique, edge endpoints must exist, self-loops / multi-edges /
+  the empty graph legal
+* **Columnar carriage** (large graphs, design §6 "delta for the id column, dictionary
+  for the label column"): `encodeColumnar` auto-picks — all-equal columns → RLE,
+  non-descending integer columns → delta, the label column → dictionary; `decode`
+  dispatches on declaration bit 2 and the two forms are semantically equivalent.
+  Measured gain (2000 nodes / 4000 edges): pure structure **2.8×**, with weights
+  **1.7×**, with payloads + attributes **1.3×**
 
 ## 入门 / Getting Started
 
@@ -69,6 +84,12 @@ ZdNode.Table root = ZdNode.Table.builder().put("name", "zd").build();
 byte[] tree = ZdDocWriter.writeTree(0, root);
 ZdNode back2 = ZdVolume.readTree(tree);
 
+// 图容器（紧凑形态 / 列式承载，decode 自动分派） / graph container (both forms)
+byte[] g = ZdGraph.encode(graph);                      // 紧凑逐条 / compact
+byte[] gc = ZdGraph.encodeColumnar(graph);             // 列式承载（大图）/ columnar (large)
+byte[] gx = ZdGraph.encodeColumnarExt(graph);          // ext 子类型 0x47 / ext subtype
+ZdGraph.GraphData backG = ZdGraph.decode(gc, 0, gc.length);
+
 // 多段文档 / multi-segment document
 byte[] doc2 = ZdSegments.assemble(0, List.of(
         new ZdSegments.Slice(ZdFooter.SEG_DATA, "", ZdDocWriter.writeBody(rows)),
@@ -79,17 +100,19 @@ List<ZdSegments.Slice> slices = ZdSegments.read(doc2);   // 经索引定位 / vi
 
 ## 构建 / Build
 
+* 仓内 Gradle wrapper：`./gradlew probe`（确定性探针 / the deterministic probe）
 * Maven：`mvn package`（pom 为规范构建描述 / the pom is the canonical build description）
-* Gradle：`gradle probe`（确定性探针 / the deterministic probe）
 * 纯 javac（离线 / offline）：
 
 ```bash
 javac -encoding UTF-8 -d out $(find src/main/java -name "*.java")
-java -cp out org.tielang.zd.ZdProbe   # 103 checks，exit 0 = PASS / exit 0 = PASS
+java -cp out org.tielang.zd.ZdProbe   # 121 checks，exit 0 = PASS / exit 0 = PASS
 ```
 
 * tsha1f KAT 向量（权威源 tiec `tests/tsha_probe/gen_tsha1_core.py`）存于
   `scripts/tsha1f-kat.txt` / the tsha1f KAT vectors live at `scripts/tsha1f-kat.txt`
+* 发布（Maven Central，Sonatype Central Portal）见 [docs/publishing.md](docs/publishing.md)
+  / publishing is covered by [docs/publishing.md](docs/publishing.md)
 
 ## License
 

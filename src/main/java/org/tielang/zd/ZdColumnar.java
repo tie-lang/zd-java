@@ -225,6 +225,9 @@ public final class ZdColumnar {
             throw new IllegalArgumentException("zd delta encoding applies to i64 columns only (got type " + c.type() + ")");
         }
         long[] v = c.ints();
+        if (v.length == 0) {
+            return; // 空列不写首值（读侧按 count 0 跳过）/ empty column writes no first value
+        }
         ZdPrimitives.writeBe64(out, v[0]);
         for (int i = 1; i < v.length; i++) {
             long diff = v[i] - v[i - 1];
@@ -423,10 +426,13 @@ public final class ZdColumnar {
                 if (type != TY_I64) {
                     throw new IllegalArgumentException("zd delta encoding applies to i64 columns only (got type " + type + ")");
                 }
-                if (pos[0] + 8 > end) {
+                if (pos[0] + 8 > end && count > 0) {
                     throw new IllegalArgumentException("zd delta first value overruns the column");
                 }
                 long[] v = new long[count];
+                if (count == 0) {
+                    return Column.ofInts(v);
+                }
                 v[0] = ZdPrimitives.readBe64(b, pos[0]);
                 pos[0] += 8;
                 for (int i = 1; i < count; i++) {

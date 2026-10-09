@@ -90,6 +90,6 @@ today):
 * [ ] `ZdProbe` 全绿（`./gradlew probe` 或 `java -cp out org.tielang.zd.ZdProbe`）
 * [ ] `scripts/tsha1f-kat.txt` 与 tiec `tests/tsha_probe/gen_tsha1_core.py` 重新对拍一致
 * [ ] pom `<version>` / README 坐标 / CHANGELOG 三处版本号同步
-* [ ] LICENSE 与 `REDACTED_LOCAL_PATH/TPL/<版本>` 逐字节一致（换版时双写）
+* [ ] LICENSE 与 `TPL 仓本地副本 /<版本>` 逐字节一致（换版时双写）
 * [ ] CHANGELOG 补齐本版条目（中英双语）
 * [ ] 若字节布局有变：同步 tie-spec 仓的 KAT 向量集（见 docs/ROAD.md 设计纪律）

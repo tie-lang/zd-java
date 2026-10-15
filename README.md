@@ -116,7 +116,7 @@ java -cp out org.tielang.zd.ZdProbe   # 121 checks，exit 0 = PASS / exit 0 = PA
 
 ## License
 
-本项目以 Tie Public License 2.2（TPL 2.2）发布——见 [LICENSE](LICENSE)。
+本项目以 Tie Public License 2.2（TPL 2.3）发布——见 [LICENSE](LICENSE)。
 
-This project is licensed under the Tie Public License 2.2 (TPL 2.2) — see
+This project is licensed under the Tie Public License 2.2 (TPL 2.3) — see
 [LICENSE](LICENSE).

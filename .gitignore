@@ -5,3 +5,5 @@ target/
 .idea/
 *.iml
 .gradle/
+# tpkg 规范
+_local_only/
